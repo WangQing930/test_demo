@@ -1,0 +1,133 @@
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.*;
+import java.util.Iterator;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public class MasterSlaveReactorServer {
+
+    private static final int PORT = 8080;
+    private static final int BUFFER_SIZE = 1024;
+    private static final int THREAD_POOL_SIZE = 10;
+
+    private Selector masterSelector;
+    private Selector slaveSelector;
+    private ServerSocketChannel serverSocketChannel;
+    private ExecutorService threadPool;
+
+    public MasterSlaveReactorServer() throws IOException {
+        masterSelector = Selector.open();
+        slaveSelector = Selector.open();
+        serverSocketChannel = ServerSocketChannel.open();
+        serverSocketChannel.bind(new java.net.InetSocketAddress(PORT));
+        serverSocketChannel.configureBlocking(false);
+        serverSocketChannel.register(masterSelector, SelectionKey.OP_ACCEPT);
+
+        threadPool = Executors.newFixedThreadPool(THREAD_POOL_SIZE);
+    }
+
+    public void start() throws IOException {
+        new Thread(this::processSlaveSelector).start();
+        processMasterSelector();
+    }
+
+    private void processMasterSelector() {
+        try {
+            while (true) {
+                masterSelector.select();
+
+                Set<SelectionKey> selectedKeys = masterSelector.selectedKeys();
+                Iterator<SelectionKey> keyIterator = selectedKeys.iterator();
+
+                while (keyIterator.hasNext()) {
+                    SelectionKey key = keyIterator.next();
+                    keyIterator.remove();
+
+                    if (key.isAcceptable()) {
+                        handleAccept(key);
+                    }
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void processSlaveSelector() {
+        try {
+            while (true) {
+                slaveSelector.select();
+
+                Set<SelectionKey> selectedKeys = slaveSelector.selectedKeys();
+                Iterator<SelectionKey> keyIterator = selectedKeys.iterator();
+
+                while (keyIterator.hasNext()) {
+                    SelectionKey key = keyIterator.next();
+                    keyIterator.remove();
+
+                    if (key.isReadable()) {
+                        handleRead(key);
+                    }
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void handleAccept(SelectionKey key) throws IOException {
+        ServerSocketChannel serverChannel = (ServerSocketChannel) key.channel();
+        SocketChannel clientChannel = serverChannel.accept();
+        clientChannel.configureBlocking(false);
+
+        // Register the new channel with the slave selector
+        clientChannel.register(slaveSelector, SelectionKey.OP_READ);
+    }
+
+    private void handleRead(SelectionKey key) {
+        SocketChannel clientChannel = (SocketChannel) key.channel();
+        ByteBuffer buffer = ByteBuffer.allocate(BUFFER_SIZE);
+
+        try {
+            int bytesRead = clientChannel.read(buffer);
+            if (bytesRead == -1) {
+                clientChannel.close();
+                return;
+            }
+
+            // Process the data in a separate thread
+            buffer.flip();
+            String request = new String(buffer.array(), 0, buffer.limit());
+            System.out.println("Received message: " + request);
+
+            String response = "Processed: " + request;
+            ByteBuffer responseBuffer = ByteBuffer.wrap(response.getBytes());
+
+            threadPool.submit(() -> {
+                try {
+                    clientChannel.write(responseBuffer);
+                    clientChannel.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            });
+        } catch (IOException e) {
+            e.printStackTrace();
+            try {
+                clientChannel.close();
+            } catch (IOException ioException) {
+                ioException.printStackTrace();
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        try {
+            new MasterSlaveReactorServer().start();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+}
